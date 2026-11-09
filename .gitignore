@@ -1,0 +1,9 @@
+/build/
+/tools/csda/
+/results/
+/cache/
+/local/
+*.dem
+*.dem.info
+*.zip
+*.user

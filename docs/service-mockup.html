@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>CS2 Replay Lab | Service design preview</title>
+  <script src="./service-mockup.js" defer></script>
+  <style>
+    :root{color-scheme:dark;--bg:#101216;--panel:#191d24;--raised:#222834;--line:#353e4c;--text:#edf0f5;--muted:#aab5c5;--blue:#94bcff;--green:#92dfbf;--amber:#f5ce8b}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+    a{color:var(--blue);text-underline-offset:4px}button,input,select{font:inherit}button,a,input,select{outline-offset:4px}
+    :focus-visible{outline:3px solid var(--blue)}button{cursor:pointer;border-radius:9px;padding:11px 17px;border:1px solid var(--line);background:var(--raised);color:var(--text)}
+    button:hover{border-color:var(--blue)}button:disabled{opacity:.5;cursor:not-allowed}.primary{background:var(--blue);border-color:var(--blue);color:#10213a;font-weight:700}
+    [hidden]{display:none!important}.shell{max-width:1220px;margin:auto;padding:0 28px}
+    header{border-bottom:1px solid var(--line)}.topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:84px}
+    .brand{display:flex;align-items:center;gap:12px;font-size:18px;font-weight:750;letter-spacing:-.03em}.mark{display:grid;place-items:center;background:var(--raised);border:1px solid var(--line);width:40px;height:40px;border-radius:11px;color:var(--blue);font:700 14px ui-monospace,monospace}
+    .topbar nav{display:flex;align-items:center;gap:24px}.preview-tag,.pill{display:inline-block;border:1px solid var(--line);border-radius:24px;padding:5px 11px;font-size:12px;font-weight:650}
+    .preview-tag{color:var(--amber);border-color:#6b5637;background:#28241c}.hero{display:flex;justify-content:space-between;align-items:flex-end;gap:40px;padding:54px 0 28px}
+    .eyebrow{font-size:11px;letter-spacing:.16em;color:var(--blue);font-weight:700;margin:0 0 15px}h1{font-size:clamp(32px,5vw,52px);letter-spacing:-.05em;line-height:1.12;margin:0 0 16px}h2{font-size:20px;letter-spacing:-.03em;margin:0 0 10px}h3{font-size:15px;margin:0 0 8px}
+    p{margin:0 0 14px}.muted{color:var(--muted)}.intro{font-size:17px;max-width:620px}.hero aside{max-width:260px;border-left:2px solid var(--line);padding-left:20px;font-size:13px}
+    .draft-note{border:1px solid #6b5637;background:#211f1a;color:var(--amber);border-radius:10px;padding:13px 17px;margin:0 0 26px;font-size:13px}
+    .workspace{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr);gap:22px;align-items:start}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:25px}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:18px}
+    .step-index{color:var(--muted);font-size:12px;font-family:ui-monospace,monospace}.dropzone{display:block;text-align:center;border:1px dashed #61738c;background:#151a23;border-radius:12px;padding:32px 20px;cursor:pointer}
+    .dropzone.dragging{border-color:var(--blue);background:#202d42}.upload-icon{display:block;color:var(--blue);font-size:33px;line-height:1;margin-bottom:14px}.dropzone strong{display:block;font-size:18px;margin-bottom:6px}.dropzone span{display:block;color:var(--muted);font-size:13px}
+    .file-input{display:block;width:100%;max-width:330px;margin:17px auto 0;color:var(--muted);font-size:13px}.file-input::file-selector-button{background:var(--raised);color:var(--text);border:1px solid var(--line);padding:8px 11px;border-radius:7px;margin-right:10px;cursor:pointer}
+    .selected{display:flex;align-items:center;gap:12px;padding:15px 0;border-bottom:1px solid var(--line);min-width:0}.file-name{font-weight:650;overflow-wrap:anywhere}.file-icon{padding:8px;border-radius:8px;background:var(--raised);font-size:11px;font-weight:700;color:var(--blue)}
+    .controls{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.small{font-size:12px}.limits{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;color:var(--muted);font-size:12px}
+    .status-line{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.state{color:var(--blue)}.state[data-state="complete"]{color:var(--green)}.state[data-state="failed"]{color:var(--amber)}
+    progress{appearance:none;width:100%;height:7px;border:0;border-radius:8px;overflow:hidden;background:var(--raised)}progress::-webkit-progress-bar{background:var(--raised)}progress::-webkit-progress-value{background:var(--blue)}
+    progress::-moz-progress-bar{background:var(--blue)}.pipeline{list-style:none;margin:20px 0;padding:0;display:grid;gap:15px}.pipeline li{display:flex;gap:12px;color:var(--muted)}
+    .dot{flex:0 0 22px;height:22px;border:1px solid var(--line);border-radius:50%;text-align:center;font:11px/20px ui-monospace,monospace}.pipeline li.active{color:var(--blue)}.pipeline li.done{color:var(--green)}.pipeline li.done .dot{border-color:var(--green)}
+    .status-detail{font-size:13px;min-height:44px}.privacy{border-top:1px solid var(--line);padding-top:18px;margin-top:20px;font-size:12px}.privacy p:last-child{margin:0}.privacy strong{color:var(--text)}
+    .player-panel{margin-top:20px;border-top:1px solid var(--line);padding-top:20px}.player-panel select{width:100%;border:1px solid var(--line);background:var(--bg);color:var(--text);padding:12px;border-radius:8px;margin:8px 0 12px}
+    .report{margin:28px 0}.report-head{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:22px}.report-head h2{font-size:26px}.report-head .pill{color:var(--green)}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.metric{background:var(--raised);padding:18px;border:1px solid var(--line);border-radius:10px}.metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;font-size:29px;letter-spacing:-.04em;color:var(--text);margin:4px 0}
+    .report-grid{display:grid;grid-template-columns:1fr 1fr;gap:26px;margin-top:25px}.chart-row{display:grid;grid-template-columns:70px 1fr 24px;align-items:center;gap:12px;margin:15px 0;font-size:13px}.bar-track{background:var(--raised);height:9px;border-radius:5px;overflow:hidden}.bar{height:100%;background:var(--blue);border-radius:5px}
+    .table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-weight:500}.measurement{border-left:3px solid var(--amber);padding:13px 16px;background:#24221d;color:var(--amber);font-size:12px;margin-top:24px}
+    .technical{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;margin:28px 0 42px}.technical p{color:var(--muted);font-size:13px}.technical code{color:var(--blue);font-size:12px;overflow-wrap:anywhere}
+    footer{border-top:1px solid var(--line);padding:22px 0 32px;color:var(--muted);font-size:12px}.footer-inner{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+    @media(max-width:850px){.hero{align-items:start;padding-top:35px}.hero aside{display:none}.workspace{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.technical{grid-template-columns:1fr}.report-grid{grid-template-columns:1fr}}
+    @media(max-width:520px){.shell{padding:0 16px}.topbar{flex-wrap:wrap;gap:8px;padding:16px 0}.topbar nav{gap:15px}.topbar nav a{font-size:12px}.preview-tag{font-size:10px}.panel{padding:19px}.report-head{align-items:start;flex-direction:column}.metric{padding:14px}.metric strong{font-size:25px}.hero{padding-top:30px}.dropzone{padding:24px 12px}}
+    @media print{body{background:#fff;color:#111}.topbar nav,.workspace,.draft-note,.technical,.controls,button{display:none}.report{border:0}.panel,.metric{background:#fff;color:#111;border-color:#bbb}.metric strong,.metric span,.muted{color:#111}.measurement{background:#fff;color:#111}}
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+  </style>
+</head>
+<body>
+  <header><div class="shell topbar">
+    <div class="brand"><span class="mark">CS2</span> Replay Lab</div>
+    <nav aria-label="Preview navigation"><a href="#analyze">Analyze</a><a href="#architecture">How it works</a><span class="preview-tag">DESIGN PREVIEW</span></nav>
+  </div></header>
+  <main class="shell">
+    <section class="hero">
+      <div><p class="eyebrow">YOUR REPLAY. YOUR EVIDENCE.</p><h1>Drop the demo.<br>See the match clearly.</h1>
+      <p class="intro muted">Upload a CS2 replay, choose a player, and get a readable report. No account scraping. No black-box cheating score.</p></div>
+      <aside class="muted"><strong>Built for the actual match.</strong><br>Combat totals, round context and source-bound events. Download the report, then let the replay expire.</aside>
+    </section>
+    <p class="draft-note"><strong>Static prototype:</strong> this page uploads nothing and never reads demo contents. All processing, players and results below are synthetic previews, not analysis of your selected file.</p>
+    <div class="workspace" id="analyze">
+      <section class="panel">
+        <div class="panel-head"><h2>Start with a replay</h2><span class="step-index">01 / INTAKE</span></div>
+        <label class="dropzone" id="dropzone" for="demo-file">
+          <span class="upload-icon" aria-hidden="true">&#8593;</span><strong>Drop a .dem file here</strong>
+          <span>Or choose a file to preview the intake interface</span>
+          <input class="file-input" id="demo-file" type="file" accept=".dem" aria-describedby="file-help">
+        </label>
+        <div class="selected"><span class="file-icon">DEM</span><div><div class="file-name" id="file-name">synthetic_mirage.dem</div><div class="muted small" id="file-detail">Synthetic sample &middot; no file attached</div></div></div>
+        <p class="muted small" id="file-help" role="status">Choose a file to inspect its name and size only. Preview runs always use synthetic sample data.</p>
+        <div class="controls"><button class="primary" id="start" type="button">Preview sample analysis</button><button id="fail" type="button">Preview a failed decode</button></div>
+        <div class="limits"><span>Proposed: 1 replay / job</span><span>256 MiB upload ceiling</span><span>Decompressed .dem only</span></div>
+        <div class="player-panel" id="player-panel" hidden>
+          <h3>Choose the player to analyze</h3><p class="muted small">A live service would read this roster from the decoded replay.</p>
+          <label for="player">Synthetic player roster</label><select id="player"><option value="one">Sample Player 1</option><option value="two">Sample Player 2</option></select>
+          <button class="primary" id="build" type="button">Build sample report</button>
+        </div>
+      </section>
+      <aside class="panel">
+        <div class="panel-head"><h2>Analysis session</h2><span class="step-index">02 / PROCESS</span></div>
+        <div class="status-line"><strong class="state" id="state" data-state="idle" role="status">Ready to preview</strong><span class="muted small" id="progress-label">0%</span></div>
+        <progress id="progress" max="100" value="0" aria-label="Synthetic workflow progress"></progress>
+        <ol class="pipeline">
+          <li id="step-intake"><span class="dot">1</span> Validate and quarantine upload</li>
+          <li id="step-decode"><span class="dot">2</span> Decode events with CSDA</li>
+          <li id="step-player"><span class="dot">3</span> Select a player from the roster</li>
+          <li id="step-report"><span class="dot">4</span> Build and verify report artifacts</li>
+        </ol>
+        <p class="muted status-detail" id="status-detail" aria-live="polite">No network calls. Try the successful or failed sample flow.</p>
+        <button id="clear" type="button">Clear / cancel preview</button>
+        <div class="privacy"><h3>Temporary by design</h3><p class="muted"><strong>Proposed live policy:</strong> remove raw replay/export after a complete report; report link expires after 1 hour. Cancel/delete requests remove the job after its worker exits.</p><p class="muted">The prototype only clears its own display. Nothing is stored on the server.</p></div>
+      </aside>
+    </div>
+    <section class="panel report" id="report" hidden>
+      <div class="report-head"><div><p class="eyebrow">SYNTHETIC REPORT / NOT YOUR UPLOAD</p><h2 id="report-title">Sample Player 1 &middot; Mirage</h2><p class="muted small">24 observed rounds &middot; sample event fixture &middot; source-linked measurements</p></div>
+      <div><span class="pill">SAMPLE COMPLETE</span><div class="controls"><button id="download" type="button">Download sample .txt</button></div></div></div>
+      <div class="metrics">
+        <div class="metric"><span>Kills / deaths / assists</span><strong id="kda">24 / 18 / 6</strong><span>Enemy combat events</span></div>
+        <div class="metric"><span>K/D</span><strong id="kd">1.333</strong><span>Count-based ratio</span></div>
+        <div class="metric"><span>Damage / observed round</span><strong id="adr">92.4</strong><span>CSDA enemy health damage</span></div>
+        <div class="metric"><span>Headshot kills</span><strong id="hs">58.3%</strong><span>14 of 24 enemy kills</span></div>
+      </div>
+      <div class="report-grid">
+        <div><h3>Sample weapon breakdown</h3><div class="chart-row"><span>AK-47</span><div class="bar-track"><div class="bar" id="bar-ak" style="width:67%"></div></div><span id="weapon-ak">16</span></div>
+        <div class="chart-row"><span>AWP</span><div class="bar-track"><div class="bar" id="bar-awp" style="width:21%"></div></div><span id="weapon-awp">5</span></div><div class="chart-row"><span>Other</span><div class="bar-track"><div class="bar" id="bar-other" style="width:12%"></div></div><span id="weapon-other">3</span></div></div>
+        <div><h3>Evidence you can inspect</h3><p class="muted small">Each event keeps its match, round and tick reference. Review markers are navigation aids, not accusations.</p>
+        <div class="table-scroll"><table><thead><tr><th>Round</th><th>Tick</th><th>Event</th><th>Weapon</th></tr></thead><tbody><tr><td>4</td><td>18,440</td><td>Opening kill</td><td>AK-47</td></tr><tr><td>9</td><td>43,112</td><td>Assist</td><td>HE</td></tr><tr><td>16</td><td>76,920</td><td>Trade kill</td><td>AWP</td></tr></tbody></table></div></div>
+      </div>
+      <p class="measurement"><strong>Measurement, not a verdict.</strong> Damage-to-kill timing is not reaction time or first visibility. Rank is not verified. The analyzer does not infer cheating probabilities; zero denominators remain N/A.</p>
+    </section>
+    <section class="technical" id="architecture" aria-label="Proposed service architecture">
+      <div class="panel"><p class="eyebrow">INGRESS</p><h3>One private job directory</h3><p>Stream accepted bytes to quarantined SSD storage, hash as they arrive, and enforce limits before decoding. Never publish a general directory share.</p><code>upload &#8594; seal &#8594; validate</code></div>
+      <div class="panel"><p class="eyebrow">EXECUTION</p><h3>One bounded CPU worker</h3><p>Pinned CSDA decoder, native C++ analyzer, no GPU slot. Restricted execution and a durable queue keep heavy or broken demos from overwhelming the host.</p><code>CSDA &#8594; JSON &#8594; C++ report</code></div>
+      <div class="panel"><p class="eyebrow">DELIVERY</p><h3>Results, then cleanup</h3><p>Publish only verified artifacts for the authenticated job owner. Show real stages, never a fabricated ETA. Expiry and failed deletion remain observable.</p><code>verify &#8594; render &#8594; expire</code></div>
+    </section>
+  </main>
+  <footer><div class="shell footer-inner"><span>CS2 Replay Lab &middot; self-hosted service proposal</span><a href="./self-hosted-service.md">Read the implementation proposal</a></div></footer>
+</body>
+</html>
