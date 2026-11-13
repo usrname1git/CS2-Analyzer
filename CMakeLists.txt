@@ -33,6 +33,10 @@ target_link_libraries(csda-service PRIVATE csda_worker winsqlite3 user32 winhttp
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(service-tests tests/service_tests.cpp)
+    target_link_libraries(service-tests PRIVATE csda_worker winsqlite3 user32 winhttp)
+    add_test(NAME service-api-fixtures COMMAND service-tests)
+    set_tests_properties(service-api-fixtures PROPERTIES TIMEOUT 45)
     add_executable(worker-tests tests/worker_tests.cpp)
     target_link_libraries(worker-tests PRIVATE csda_worker)
     add_test(NAME worker-containment COMMAND worker-tests)

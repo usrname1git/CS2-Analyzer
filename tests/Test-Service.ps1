@@ -5,6 +5,13 @@ param(
     [string]$BaseUri = 'https://csda.autom8ed.me'
 )
 $ErrorActionPreference = 'Stop'
+function Get-Sha256Utf8([string]$Text) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
 $root = Split-Path -Parent $PSScriptRoot
 if ($BaseUri -ne 'https://csda.autom8ed.me') { throw 'Unexpected qualification endpoint.' }
 Add-Type @'
@@ -37,7 +44,7 @@ public static class CsdaTestCredential {
     }
 }
 '@
-$hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($root))).ToLowerInvariant()
+$hash = Get-Sha256Utf8 $root
 $secret = [CsdaTestCredential]::Read("Local\CSDA.$($hash.Substring(0,24)).BetaAccess")
 $handler = [Net.Http.HttpClientHandler]::new()
 $handler.UseProxy = $false
@@ -100,7 +107,7 @@ try {
         $analysis.summary.rounds -eq 18 -and @($analysis.warnings).Count -eq 0) 'Public-fixture result differs from the native reference.'
     Assert (-not (Test-Path -LiteralPath (Join-Path $root "local\jobs\$id"))) 'Raw input survived publication.'
     $report = Request GET "/api/jobs/$id/report"
-    $reportHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($report.Text))).ToLowerInvariant()
+    $reportHash = Get-Sha256Utf8 $report.Text
     Assert ($report.Status -eq 200 -and $reportHash -eq $complete.artifacts.'report.html'.sha256) 'TLS report download changed bytes.'
     $receipt = [ordered]@{status='pass';at=[datetime]::UtcNow.ToString('o');endpoint=$BaseUri;
         route='public hostname from the hosting PC; not off-host upload proof';job=$complete;

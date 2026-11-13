@@ -16,6 +16,23 @@ function Reject([scriptblock]$Action, [string]$Message) {
     Assert $rejected $Message
 }
 try {
+    foreach ($script in @('Invoke-CS2Analysis.ps1', 'tests\Test-Service.ps1')) {
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root $script), [ref]$tokens, [ref]$errors)
+        Assert ($errors.Count -eq 0) "PowerShell parse: $script"
+        $hashFunction = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-Sha256Utf8'
+        }, $true)
+        Assert ($null -ne $hashFunction) "Missing compatible hash helper: $script"
+        . ([scriptblock]::Create($hashFunction.Extent.Text))
+        foreach ($text in @('', 'abc', 'name & unicode-é', "$root|faceit|False")) {
+            $vectorPath = Join-Path $temporary 'hash-vector.txt'
+            [IO.File]::WriteAllText($vectorPath, $text, [Text.UTF8Encoding]::new($false))
+            $expected = (Get-FileHash -LiteralPath $vectorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            Assert ((Get-Sha256Utf8 $text) -ceq $expected) "Exact compatible SHA-256: $script"
+        }
+    }
     $steam = '76561198000000001'
     $kill = @{
         roundNumber=1;tick=20;weaponName='AK-47';weaponType='rifle'
@@ -79,6 +96,20 @@ try {
     $manifest2 = Get-Content -LiteralPath (Join-Path $run2 'manifest.json') -Raw | ConvertFrom-Json
     Assert $manifest2.inputs[0].decoder_provenance.cache_reused 'Hash-bound decoder cache reuse'
     Assert ($manifest2.inputs[0].decoder_provenance.decoder_version -eq 'custom_binary') 'Do not claim fake decoder is CSDA'
+    $demoHash = (Get-FileHash -LiteralPath $demo -Algorithm SHA256).Hash.ToLowerInvariant()
+    $decoderHash = (Get-FileHash -LiteralPath $DecoderPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $identityFile = Join-Path $temporary 'cache-identity.txt'
+    [IO.File]::WriteAllText($identityFile, "$demoHash|$decoderHash|faceit|False", [Text.UTF8Encoding]::new($false))
+    $expectedKey = (Get-FileHash -LiteralPath $identityFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $cachedJson = Join-Path $cache "$expectedKey.json"
+    Assert (Test-Path -LiteralPath $cachedJson) 'Exact UTF-8 cache identity must be preserved'
+    Assert ($manifest2.inputs[0].decoder_provenance.demo_sha256 -eq $demoHash) 'Immutable demo hash'
+    '{}' | Set-Content -LiteralPath $cachedJson -Encoding utf8NoBOM
+    $run3 = & (Join-Path $root 'Invoke-CS2Analysis.ps1') -InputPath $demo -SteamId $steam `
+        -OutDir $outRoot -CacheDir $cache -AnalyzerPath $AnalyzerPath -CsdaPath $DecoderPath -Platform Faceit
+    $manifest3 = Get-Content -LiteralPath (Join-Path $run3 'manifest.json') -Raw | ConvertFrom-Json
+    Assert (-not $manifest3.inputs[0].decoder_provenance.cache_reused) 'Corrupted cache must be decoded again'
+    Assert ((Get-FileHash -LiteralPath $demo -Algorithm SHA256).Hash.ToLowerInvariant() -eq $demoHash) 'Input bytes remain unchanged'
     '{"test_exit":7}' | Set-Content -LiteralPath $demo
     Reject { & (Join-Path $root 'Invoke-CS2Analysis.ps1') -InputPath $demo -SteamId $steam `
         -OutDir $outRoot -CacheDir $cache -AnalyzerPath $AnalyzerPath -CsdaPath $DecoderPath } 'Decoder failure must propagate'

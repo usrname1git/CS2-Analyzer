@@ -16,6 +16,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+function Get-Sha256Utf8([string]$Text) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
 [uint64]$null = [uint64]::Parse($SteamId)
 if (-not (Test-Path -LiteralPath $AnalyzerPath -PathType Leaf)) {
     throw "Analyzer executable missing. Run scripts\Build.ps1 first: $AnalyzerPath"
@@ -115,8 +122,7 @@ foreach ($file in $files) {
     }
     $demoHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     $identity = "$demoHash|$decoderHash|$source|$Positions"
-    $cacheKey = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
-        [Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
+    $cacheKey = Get-Sha256Utf8 $identity
     $jsonPath = Join-Path $CacheDir "$cacheKey.json"
     $receiptPath = Join-Path $CacheDir "$cacheKey.receipt.json"
     $reusable = $false

@@ -43,13 +43,19 @@ provisional per-phase commit ceiling is the smaller of 16 GiB and available
 RAM minus 4 GiB; monitoring stops the worker if the host reserve falls below
 4 GiB. Each phase has a 300-second timeout and monitored 3 GiB write budget
 (not a filesystem hard quota). Complete raw replay/JSON is removed before
-report publication; selection expires after 15 minutes and reports after one
-hour. Cleanup resumes after restart; failures close new admission.
+report publication; selection expires after 15 minutes. Accepted player analysis
+has a separate one-hour queue/processing deadline, without extending phase
+timeouts; completed reports then expire after one hour. Cancellation and expired
+selection cannot renew a job. Cleanup resumes after restart; failures close new
+admission.
 
 Resource receipts distinguish CPU-seconds, worker elapsed time, peak committed
 memory, peak working set and I/O bytes. Upload bytes/time and served payload
 bytes are application measurements, not WAN capacity, NIC utilization or TLS
-overhead. One 124 MiB reference replay decoded/analyzed in roughly two seconds
+overhead. `served_payload_bytes` counts only completed server sends of result/report
+GET bodies, not HEAD, receipts, or failed partial sends. A download already
+authorized before cancellation may finish; it cannot restore the deleted ledger.
+One 124 MiB reference replay decoded/analyzed in roughly two seconds
 with about 162 MiB peak worker working set on the qualification host; this is
 one fixture, not a concurrency benchmark or optimum RAM budget.
 
@@ -88,6 +94,35 @@ labelled `custom_binary` unless accompanied by a matching installation receipt.
 The offline suite uses synthetic data. Its containment fixture owns an ephemeral
 loopback port, so it can run alongside the live service on 8091 without stopping
 or reconfiguring that service. The production startup probe still uses 8091.
+The separate `service-api-fixtures` target exercises production request handling
+on fixture-owned ephemeral sockets with synthetic credentials, a disposable
+SQLite ledger, and a controllable clock. It checks exact cookies/CSRF/ownership,
+slow-body and backpressured-response concurrency, bounded login recovery,
+selection expiry, and completed-transfer accounting. It does not run service
+setup, read Windows credentials, or create AppContainer profiles.
+
+For scoped offline verification after configuring CMake, keep child scratch data
+inside the project and exclude the containment/live qualification suites:
+
+```powershell
+$null = New-Item -ItemType Directory -Path '.\results\fixtures' -Force
+$env:TEMP = (Resolve-Path '.\results\fixtures').Path
+$env:TMP = $env:TEMP
+cmake --build .\build --config Release --target `
+    csda-service service-tests analysis-tests cs2-analyzer test-decoder
+ctest --test-dir .\build -C Release --output-on-failure `
+    -R '^(service-api-fixtures|analysis-fixtures|cli-and-launcher)$'
+node --test .\tests\web_app_tests.js
+```
+
+Node is only a development test runner here; the CLI and service have no Node
+runtime or npm dependency. Browser tests execute the actual `web\app.js` with
+deferred requests and timers. Cancelling invalidates pending job responses and
+upload callbacks. Transient status/result failures retry five times with bounded
+backoff; exhaustion exposes **Retry status**, which queries the same job without
+resubmitting upload or analysis. Authentication, missing-job, and expiry errors
+stop automatic retries.
+
 For an opt-in real-demo regression,
 download `cs2/esportal_6045888_2024_mirage.dem` from
 https://gitlab.com/akiver/cs-demos/-/raw/main/cs2/esportal_6045888_2024_mirage.dem

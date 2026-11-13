@@ -6,6 +6,18 @@ native `csda-service` are the live implementation. The design draft below is
 historical, not the deployed configuration: the beta uses a 512 MiB upload cap,
 dynamic bounded worker commit, SQLite continuity and the existing C++ analysis
 library inside AppContainer workers; accounts/MongoDB history remain deferred.
+Player selection must still be active when its request is committed. Acceptance
+starts a bounded one-hour analysis queue/processing deadline, separate from
+selection and completed-report retention. Session cookies match exact field
+names and ambiguous duplicates are denied. Login histories expire before new-IP
+capacity checks; request socket I/O runs outside the shared state mutex.
+
+The current browser invalidates cancelled job requests and uses bounded polling
+recovery with an explicit **Retry status** action. Receipts count completed
+result/report GET bodies only (not HEAD or interrupted transfers).
+`tests\service_tests.cpp` and `tests\web_app_tests.js` cover these paths offline;
+see the README for the scoped commands that do not use live credentials or
+create containment profiles. The historical proposal below is unchanged.
 
 Open `service-mockup.html` beside this document for the original
 interactive static GUI. It reads file metadata only; it cannot upload, decode or

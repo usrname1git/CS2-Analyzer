@@ -12,6 +12,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -139,11 +140,25 @@ struct Database {
         require(ok, "Ledger delete failed");
     }
 };
+struct ApiError : std::runtime_error {
+    int status;
+    ApiError(int code, const char* message) : std::runtime_error(message), status(code) {}
+};
+#ifdef CSDA_SERVICE_TEST
+std::function<void(bool)> transport_observer;
+#endif
 struct Request {
     SOCKET socket = INVALID_SOCKET;
     std::string method, path, pending;
     std::map<std::string, std::string> headers;
     std::uint64_t length = 0, received = 0, started = GetTickCount64();
+    bool response_started = false;
+    int receive(char* buffer, int count) {
+#ifdef CSDA_SERVICE_TEST
+        if (transport_observer) transport_observer(false);
+#endif
+        return recv(socket, buffer, count, 0);
+    }
     explicit Request(SOCKET value) : socket(value) {
         DWORD timeout = 5000;
         setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&timeout), sizeof(timeout));
@@ -152,7 +167,7 @@ struct Request {
         char buffer[8192];
         size_t end = std::string::npos;
         while ((end = header.find("\r\n\r\n")) == std::string::npos) {
-            const auto count = recv(socket, buffer, sizeof(buffer), 0);
+            const auto count = receive(buffer, sizeof(buffer));
             require(count > 0 && header.size() + static_cast<size_t>(count) <= 16384 &&
                 GetTickCount64() - started <= 10000, "Invalid request headers");
             header.append(buffer, static_cast<size_t>(count));
@@ -203,20 +218,23 @@ struct Request {
         std::array<char, 65536> buffer{};
         while (received < length) {
             require(GetTickCount64() - started <= 180000 && (!cancel || !cancel->load()), "Upload cancelled or timed out");
-            const auto count = recv(socket, buffer.data(), static_cast<int>(
-                std::min<std::uint64_t>(buffer.size(), length - received)), 0);
+            const auto count = receive(buffer.data(), static_cast<int>(
+                std::min<std::uint64_t>(buffer.size(), length - received)));
             require(count > 0, "Upload interrupted");
             write(buffer.data(), static_cast<size_t>(count));
             received += static_cast<size_t>(count);
         }
     }
     Json json() {
+        if (length > 4096) throw ApiError(413, "Request body exceeds byte limit");
         std::string body;
         stream([&](const char* data, size_t count) { body.append(data, count); }, 4096);
-        return Json::parse(body);
+        try { return Json::parse(body); }
+        catch (const Json::parse_error&) { throw ApiError(400, "Invalid JSON request"); }
     }
-    void send(int status, const std::string& body, const std::string& type = "application/json",
+    size_t send(int status, const std::string& body, const std::string& type = "application/json",
               const std::string& extra_headers = "") {
+        require(!response_started, "Response already started");
         std::string response = "HTTP/1.1 " + std::to_string(status) + " Response\r\nConnection: close\r\n"
             "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
             "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -225,17 +243,39 @@ struct Request {
         if (method != "HEAD") response += body;
         size_t offset = 0;
         while (offset < response.size()) {
+#ifdef CSDA_SERVICE_TEST
+            if (transport_observer) transport_observer(true);
+#endif
             const auto sent = ::send(socket, response.data() + offset,
                 static_cast<int>(std::min<size_t>(65536, response.size() - offset)), 0);
             require(sent > 0, "Response interrupted");
+            response_started = true;
             offset += static_cast<size_t>(sent);
         }
+        return method == "HEAD" ? 0 : body.size();
     }
 };
-struct ApiError : std::runtime_error {
-    int status;
-    ApiError(int code, const char* message) : std::runtime_error(message), status(code) {}
-};
+std::string session_cookie(const std::string& cookie) {
+    std::optional<std::string> token;
+    for (size_t begin = 0; begin < cookie.size();) {
+        auto end = cookie.find(';', begin);
+        if (end == std::string::npos) end = cookie.size();
+        auto field = cookie.substr(begin, end - begin);
+        const auto first = field.find_first_not_of(" \t");
+        if (first != std::string::npos) {
+            field = field.substr(first, field.find_last_not_of(" \t") - first + 1);
+            const auto equals = field.find('=');
+            if (field.substr(0, equals) == "__Host-csda") {
+                if (token || equals == std::string::npos) throw ApiError(401, "Ambiguous session cookie");
+                token = field.substr(equals + 1);
+            }
+        }
+        begin = end + 1;
+    }
+    if (!token) throw ApiError(401, "Beta access required");
+    if (!identifier(*token, 64)) throw ApiError(401, "Invalid session");
+    return *token;
+}
 struct Job {
     Json data;
     std::atomic<bool> cancel{false};
@@ -250,10 +290,14 @@ struct Server {
     std::map<std::string, std::vector<long long>> logins;
     std::atomic<bool> stopping{false};
     std::string secret;
+    std::function<long long()> clock;
     bool ready = false, cleanup_safe = true;
-    explicit Server(const fs::path& directory) : root(directory), local(root / "local"),
-        config(small_json(local / "service.json", 16384)), db(local / "jobs.sqlite"),
-        secret(beta_secret(root, false)) {
+    explicit Server(const fs::path& directory) : Server(directory,
+        small_json(directory / "local" / "service.json", 16384), beta_secret(directory, false), now) {}
+    Server(const fs::path& directory, Json settings, std::string invite,
+           std::function<long long()> time_source) : root(directory), local(root / "local"),
+        config(std::move(settings)), db(local / "jobs.sqlite"), secret(std::move(invite)),
+        clock(std::move(time_source)) {
         require(config.at("origin").is_string() && config.at("port") == 8091 &&
             config.at("upload_max_bytes").get<std::uint64_t>() <= GiB, "Invalid service configuration");
         sessions = db.load("sessions");
@@ -264,10 +308,28 @@ struct Server {
             if (job->data.at("state") != "complete") {
                 job->data["state"] = "cleanup_pending";
                 job->data["error"] = "Interrupted by service restart";
-                job->data["expires"] = now();
+                job->data["expires"] = time_now();
                 db.put("jobs", pair.first, job->data);
             }
         }
+    }
+    long long time_now() const { return clock(); }
+    void admit_login(const std::string& ip) {
+        const auto instant = time_now();
+        for (auto iterator = logins.begin(); iterator != logins.end();) {
+            auto& attempts = iterator->second;
+            attempts.erase(std::remove_if(attempts.begin(), attempts.end(),
+                [instant](long long time) { return instant - time > 60; }), attempts.end());
+            if (attempts.empty()) iterator = logins.erase(iterator);
+            else ++iterator;
+        }
+        auto found = logins.find(ip);
+        if (found == logins.end()) {
+            if (logins.size() >= 512) throw ApiError(429, "Login admission busy");
+            found = logins.emplace(ip, std::vector<long long>{}).first;
+        }
+        if (found->second.size() >= 6) throw ApiError(429, "Wait a minute before trying access again");
+        found->second.push_back(instant);
     }
     fs::path workspace(const std::string& id) {
         require(identifier(id), "Invalid job path");
@@ -276,18 +338,13 @@ struct Server {
     void save(const std::shared_ptr<Job>& job) { db.put("jobs", job->data.at("id"), job->data); }
     void log(const char* component, const std::exception& error) {
         std::ofstream output(local / "errors.log", std::ios::app);
-        output << now() << " " << component << ": " << std::string(error.what()).substr(0, 240) << "\n";
+        output << time_now() << " " << component << ": " << std::string(error.what()).substr(0, 240) << "\n";
         require(static_cast<bool>(output), "Cannot persist service error");
     }
     std::string owner(Request& request, bool mutate) {
-        auto cookie = request.header("cookie");
-        const auto start = cookie.find("__Host-csda=");
-        if (start == std::string::npos) throw ApiError(401, "Beta access required");
-        auto token = cookie.substr(start + 12);
-        token = token.substr(0, token.find(';'));
-        if (!identifier(token, 64)) throw ApiError(401, "Invalid session");
+        const auto token = session_cookie(request.header("cookie"));
         const auto id = cs2::sha256_text(token);
-        if (!sessions.count(id) || sessions.at(id).at("expires").get<long long>() <= now())
+        if (!sessions.count(id) || sessions.at(id).at("expires").get<long long>() <= time_now())
             throw ApiError(401, "Session expired");
         if (mutate && request.header("x-csda-csrf") != sessions.at(id).at("csrf"))
             throw ApiError(403, "Invalid request token");
@@ -302,7 +359,7 @@ struct Server {
     Json public_job(const std::shared_ptr<Job>& job) {
         auto result = job->data;
         result.erase("owner"); result.erase("selected_name");
-        result["server_time"] = now();
+        result["server_time"] = time_now();
         return result;
     }
     void handle(Request& request) {
@@ -319,32 +376,34 @@ struct Server {
         if (request.path.rfind("/api/", 0) != 0) throw ApiError(404, "Not found");
         if (!read && request.header("origin") != config.at("origin")) throw ApiError(403, "Origin denied");
         if (request.path == "/api/session" && request.method == "POST") {
-            std::lock_guard<std::mutex> lock(mutex);
             auto ip = request.header("x-csda-client-ip");
             if (ip.empty() || ip.size() > 64) ip = "loopback";
-            if (logins.size() > 512) throw ApiError(429, "Login admission busy");
-            auto& attempts = logins[ip];
-            attempts.erase(std::remove_if(attempts.begin(), attempts.end(),
-                [](long long time) { return now() - time > 60; }), attempts.end());
-            if (attempts.size() >= 6) throw ApiError(429, "Wait a minute before trying access again");
-            attempts.push_back(now());
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                admit_login(ip);
+            }
             auto body = request.json();
             if (!body.is_object() || body.size() != 1 || !body.contains("invite") || !body["invite"].is_string() ||
                 cs2::sha256_text(body["invite"].get<std::string>()) != cs2::sha256_text(secret))
                 throw ApiError(403, "Invalid beta access");
+            std::unique_lock<std::mutex> lock(mutex);
             if (sessions.size() >= 128) throw ApiError(503, "Session capacity reached");
             const auto token = random_token(), id = cs2::sha256_text(token);
-            sessions[id] = {{"csrf", random_token()}, {"expires", now() + 7200}};
+            sessions[id] = {{"csrf", random_token()}, {"expires", time_now() + 7200}};
             db.put("sessions", id, sessions[id]);
-            request.send(200, Json{{"csrf", sessions[id]["csrf"]}, {"upload_max_bytes", config["upload_max_bytes"]}}.dump(),
+            const auto response = Json{{"csrf", sessions[id]["csrf"]}, {"upload_max_bytes", config["upload_max_bytes"]}}.dump();
+            lock.unlock();
+            request.send(200, response,
                 "application/json", "Set-Cookie: __Host-csda=" + token +
                 "; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=7200\r\n"); return;
         }
         std::unique_lock<std::mutex> lock(mutex);
         const auto user = owner(request, !read);
         if (request.path == "/api/session" && read) {
-            request.send(200, Json{{"csrf", sessions.at(user).at("csrf")},
-                {"upload_max_bytes", config["upload_max_bytes"]}}.dump()); return;
+            const auto response = Json{{"csrf", sessions.at(user).at("csrf")},
+                {"upload_max_bytes", config["upload_max_bytes"]}}.dump();
+            lock.unlock();
+            request.send(200, response); return;
         }
         if (request.path == "/api/jobs" && request.method == "POST") {
             size_t pending = 0;
@@ -361,10 +420,12 @@ struct Server {
             auto job = std::make_shared<Job>();
             const auto id = random_token().substr(0, 32);
             require(fs::create_directory(workspace(id)), "Cannot create exclusive job");
-            job->data = {{"id", id}, {"owner", user}, {"state", "reserved"}, {"created", now()},
-                {"expires", now() + 180}, {"upload_bytes", 0}, {"phases", Json::array()}};
+            job->data = {{"id", id}, {"owner", user}, {"state", "reserved"}, {"created", time_now()},
+                {"expires", time_now() + 180}, {"upload_bytes", 0}, {"phases", Json::array()}};
             jobs[id] = job; save(job);
-            request.send(201, public_job(job).dump()); return;
+            const auto response = public_job(job).dump();
+            lock.unlock();
+            request.send(201, response); return;
         }
         const auto prefix = std::string("/api/jobs/");
         if (request.path.rfind(prefix, 0) != 0) throw ApiError(404, "Not found");
@@ -373,19 +434,25 @@ struct Server {
         const auto id = rest.substr(0, slash);
         const auto action = slash == std::string::npos ? "" : rest.substr(slash + 1);
         const auto job = owned(id, user);
-        if (read && action.empty()) { request.send(200, public_job(job).dump()); return; }
+        if (read && action.empty()) {
+            const auto response = public_job(job).dump();
+            lock.unlock();
+            request.send(200, response); return;
+        }
         if (request.method == "DELETE" && action.empty()) {
             job->cancel = true;
-            job->data["expires"] = now();
+            job->data["expires"] = time_now();
             save(job);
+            lock.unlock();
             request.send(202, Json{{"state", "cancelling"}}.dump()); return;
         }
         if (action == "demo" && request.method == "PUT") {
-            if (job->data.at("state") != "reserved" || job->data.at("expires").get<long long>() <= now())
+            if (job->cancel || job->data.at("state") != "reserved" ||
+                job->data.at("expires").get<long long>() <= time_now())
                 throw ApiError(409, "Upload reservation is not active");
             if (request.length < 16 || request.length > config.at("upload_max_bytes").get<std::uint64_t>())
                 throw ApiError(413, "Replay exceeds the upload limit or is empty");
-            job->data["state"] = "uploading"; job->data["expires"] = now() + 180; save(job);
+            job->data["state"] = "uploading"; job->data["expires"] = time_now() + 180; save(job);
             lock.unlock();
             try {
                 const auto path = workspace(id) / "upload.pending";
@@ -408,21 +475,29 @@ struct Server {
                 job->data["upload_bytes"] = request.received;
                 job->data["upload_ms"] = GetTickCount64() - request.started;
                 job->data["source_sha256"] = hash;
-                job->data["expires"] = now() + 900;
+                job->data["expires"] = job->cancel ? time_now() : time_now() + 900;
                 save(job);
-                request.send(200, public_job(job).dump());
             } catch (const std::exception& error) {
                 if (!lock.owns_lock()) lock.lock();
                 log("upload", error);
-                job->data["state"] = "cleanup_pending"; job->data["expires"] = now();
+                job->data["state"] = "cleanup_pending"; job->data["expires"] = time_now();
                 job->data["error"] = "Upload failed: interrupted, unsupported replay, or resource limit";
                 save(job);
                 throw ApiError(422, "Upload failed; no analysis was published");
             }
+            const auto response = public_job(job).dump();
+            lock.unlock();
+            request.send(200, response);
             return;
         }
         if (action == "analysis" && request.method == "POST") {
+            lock.unlock();
             auto body = request.json();
+            lock.lock();
+            if (owner(request, true) != user || owned(id, user) != job)
+                throw ApiError(404, "Job not found");
+            if (job->cancel || job->data.at("expires").get<long long>() <= time_now())
+                throw ApiError(409, "Player selection expired or cancelled");
             if (job->data.at("state") != "select") throw ApiError(409, "Job is not awaiting player selection");
             if (!body.is_object() || body.size() != 1 || !body.contains("steam_id") || !body["steam_id"].is_string())
                 throw ApiError(400, "Select a player from this job");
@@ -432,26 +507,38 @@ struct Server {
                 found = true; job->data["selected_name"] = player.at("name"); break;
             }
             if (!found) throw ApiError(400, "Player does not belong to this replay");
-            job->data["steam_id"] = id_text; job->data["state"] = "analysis_queued"; save(job);
-            request.send(202, public_job(job).dump()); return;
+            job->data["steam_id"] = id_text; job->data["state"] = "analysis_queued";
+            job->data["expires"] = time_now() + 3600;
+            save(job);
+            const auto response = public_job(job).dump();
+            lock.unlock();
+            request.send(202, response); return;
         }
         if (read && (action == "result" || action == "report" || action == "receipt")) {
-            if (job->data.at("state") != "complete" || job->data.at("expires").get<long long>() <= now())
+            if (job->cancel || job->data.at("state") != "complete" ||
+                job->data.at("expires").get<long long>() <= time_now())
                 throw ApiError(409, "Completed result unavailable");
+            const auto snapshot = public_job(job);
+            lock.unlock();
             if (action == "receipt") {
-                auto receipt = public_job(job);
-                request.send(200, receipt.dump(2), "application/json",
+                request.send(200, snapshot.dump(2), "application/json",
                     "Content-Disposition: attachment; filename=\"CSDA-receipt.json\"\r\n");
             } else {
                 const auto filename = action == "result" ? "result.json" : "report.html";
                 const auto path = local / "results" / id / filename;
-                require(cs2::sha256_file(path) == job->data.at("artifacts").at(filename).at("sha256"),
+                require(cs2::sha256_file(path) == snapshot.at("artifacts").at(filename).at("sha256"),
                     "Published artifact hash mismatch");
                 const auto content = text_file(path, action == "result" ? 1024 * 1024 : 16 * 1024 * 1024);
-                request.send(200, content, action == "result" ? "application/json" : "application/octet-stream",
+                const auto sent = request.send(200, content, action == "result" ? "application/json" : "application/octet-stream",
                     action == "report" ? "Content-Disposition: attachment; filename=\"CSDA-report.html\"\r\n" : "");
-                job->data["served_payload_bytes"] = job->data.value("served_payload_bytes", 0ULL) + content.size();
-                save(job);
+                if (sent) {
+                    lock.lock();
+                    const auto found = jobs.find(id);
+                    if (found != jobs.end() && found->second == job && !job->cancel) {
+                        job->data["served_payload_bytes"] = job->data.value("served_payload_bytes", 0ULL) + sent;
+                        save(job);
+                    }
+                }
             }
             return;
         }
@@ -473,51 +560,58 @@ struct Server {
         }
         (void)job;
     }
-    void phase(const std::shared_ptr<Job>& job, const fs::path& executable,
+    void phase(const std::shared_ptr<Job>& job, const std::string& id, const fs::path& executable,
                const std::vector<std::wstring>& arguments, const std::string& name) {
         const auto available = cs2::service::available_memory();
         require(available > 5 * GiB, "Host memory reserve unavailable");
         const auto budget = std::min<std::uint64_t>(16 * GiB, available - 4 * GiB);
         require(budget >= GiB, "Host memory reserve unavailable");
-        auto metric = cs2::service::run_isolated(executable, arguments, workspace(job->data.at("id")),
+        auto metric = cs2::service::run_isolated(executable, arguments, workspace(id),
             job->cancel, budget, 300, name != "decode");
         metric["stage"] = name;
         {
             std::lock_guard<std::mutex> lock(mutex);
             job->data["phases"].push_back(metric); save(job);
         }
-        cs2::service::validate_tree(workspace(job->data.at("id")));
+        cs2::service::validate_tree(workspace(id));
         if (metric.at("exit_code") != 0 || metric.contains("error")) {
-            const auto diagnostics = text_file(workspace(job->data.at("id")) / "worker.log", 32768);
+            const auto diagnostics = text_file(workspace(id) / "worker.log", 32768);
             throw std::runtime_error(name + " failed: " + diagnostics.substr(0, 180));
         }
     }
     void execute(const std::shared_ptr<Job>& job, bool decode) {
-        const std::string id = job->data.at("id");
+        Json snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = job->data;
+        }
+        const std::string id = snapshot.at("id");
         const auto work = workspace(id);
         if (decode) {
             const auto decoder = root / "tools" / "csda" / "csda.exe";
             require(cs2::sha256_file(decoder) == small_json(decoder.parent_path() / "installed.json").at("exe_sha256"),
                 "Installed decoder hash changed");
             cs2::write_text(work / "match.json", "");
-            phase(job, decoder, {L"-demo-path=" + (work / "upload.dem").wstring(),
+            phase(job, id, decoder, {L"-demo-path=" + (work / "upload.dem").wstring(),
                 L"-output=" + (work / "match.json").wstring(), L"-format=json", L"-minify"}, "decode");
-            require(cs2::sha256_file(work / "upload.dem") == job->data.at("source_sha256"),
+            require(cs2::sha256_file(work / "upload.dem") == snapshot.at("source_sha256"),
                 "Sealed replay changed");
             const auto decoded_hash = cs2::sha256_file(work / "match.json");
-            phase(job, cs2::service::image_path(), {L"--roster", work.wstring()}, "roster");
+            phase(job, id, cs2::service::image_path(), {L"--roster", work.wstring()}, "roster");
             const auto roster = small_json(work / "roster.json", 32768);
             require(roster.is_array() && !roster.empty() && roster.size() <= 64, "Decoded roster invalid");
             std::lock_guard<std::mutex> lock(mutex);
+            require(!job->cancel && job->data.at("expires").get<long long>() > time_now(),
+                "Job cancelled or expired before selection");
             job->data["players"] = roster; job->data["state"] = "select";
             job->data["decoded_sha256"] = decoded_hash;
             job->data["decoder_version"] = "v1.11.0";
-            job->data["expires"] = now() + 900; save(job);
+            job->data["expires"] = time_now() + 900; save(job);
         } else {
-            const auto steam = job->data.at("steam_id").get<std::string>();
-            require(cs2::sha256_file(work / "match.json") == job->data.at("decoded_sha256"),
+            const auto steam = snapshot.at("steam_id").get<std::string>();
+            require(cs2::sha256_file(work / "match.json") == snapshot.at("decoded_sha256"),
                 "Sealed decoder output changed");
-            phase(job, cs2::service::image_path(), {L"--analyze", work.wstring(), wide(steam)}, "analysis");
+            phase(job, id, cs2::service::image_path(), {L"--analyze", work.wstring(), wide(steam)}, "analysis");
             const auto publication = small_json(work / "publish" / "publication.json", 4096);
             require(publication.is_object() && publication.size() == 2 &&
                 publication.contains("result.json") && publication.contains("report.html"), "Publication manifest invalid");
@@ -533,55 +627,62 @@ struct Server {
             // Remove raw data before exposing the completed result.
             cleanup(id, job);
             std::lock_guard<std::mutex> lock(mutex);
+            require(!job->cancel && job->data.at("expires").get<long long>() > time_now(),
+                "Job cancelled or expired before publication");
             job->data["artifacts"] = publication; job->data["state"] = "complete";
-            job->data["expires"] = now() + 3600; save(job);
+            job->data["expires"] = time_now() + 3600; save(job);
         }
+    }
+    std::pair<std::shared_ptr<Job>, bool> take_work() {
+        std::shared_ptr<Job> selected; bool decode = false;
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto iterator = sessions.begin(); iterator != sessions.end();) {
+            if (iterator->second.at("expires").get<long long>() <= time_now()) {
+                db.erase("sessions", iterator->first); iterator = sessions.erase(iterator);
+            } else ++iterator;
+        }
+        for (auto iterator = jobs.begin(); iterator != jobs.end();) {
+            const auto id = iterator->first;
+            auto job = iterator->second;
+            const auto state = job->data.at("state").get<std::string>();
+            if (state != "uploading" && (job->cancel || job->data.at("expires").get<long long>() <= time_now() ||
+                state == "cleanup_pending")) {
+                try {
+                    cleanup(id, job);
+                    const auto result = local / "results" / id;
+                    if (fs::exists(result)) fs::remove_all(result);
+                    if (state == "cleanup_pending" && job->data.contains("error") && !job->cancel) {
+                        job->data["state"] = "failed"; job->data["expires"] = time_now() + 120; save(job);
+                        ++iterator; continue;
+                    }
+                    db.erase("jobs", id); iterator = jobs.erase(iterator); continue;
+                } catch (const std::exception& error) {
+                    log("cleanup", error); cleanup_safe = false;
+                    job->data["state"] = "cleanup_pending"; save(job);
+                    ++iterator; continue;
+                }
+            }
+            if (!selected && !job->cancel && job->data.at("expires").get<long long>() > time_now() &&
+                (state == "queued" || state == "analysis_queued")) {
+                selected = job; decode = state == "queued";
+                job->data["state"] = decode ? "decoding" : "analyzing"; save(job);
+            }
+            ++iterator;
+        }
+        return {selected, decode};
     }
     void worker_loop() {
         while (!stopping) {
-            std::shared_ptr<Job> selected; bool decode = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                for (auto iterator = sessions.begin(); iterator != sessions.end();) {
-                    if (iterator->second.at("expires").get<long long>() <= now()) {
-                        db.erase("sessions", iterator->first); iterator = sessions.erase(iterator);
-                    } else ++iterator;
-                }
-                for (auto iterator = jobs.begin(); iterator != jobs.end();) {
-                    const auto id = iterator->first;
-                    auto job = iterator->second;
-                    auto state = job->data.at("state").get<std::string>();
-                    if (state != "uploading" && (job->cancel || job->data.at("expires").get<long long>() <= now() ||
-                        state == "cleanup_pending")) {
-                        try {
-                            cleanup(id, job);
-                            const auto result = local / "results" / id;
-                            if (fs::exists(result)) fs::remove_all(result);
-                            if (state == "cleanup_pending" && job->data.contains("error") && !job->cancel) {
-                                job->data["state"] = "failed"; job->data["expires"] = now() + 120; save(job);
-                                ++iterator; continue;
-                            }
-                            db.erase("jobs", id); iterator = jobs.erase(iterator); continue;
-                        } catch (const std::exception& error) {
-                            log("cleanup", error); cleanup_safe = false;
-                            job->data["state"] = "cleanup_pending"; save(job);
-                        }
-                    }
-                    if (!selected && (state == "queued" || state == "analysis_queued")) {
-                        selected = job; decode = state == "queued";
-                        job->data["state"] = decode ? "decoding" : "analyzing"; save(job);
-                    }
-                    ++iterator;
-                }
-            }
+            const auto next = take_work();
+            const auto& selected = next.first;
             if (selected) {
-                try { execute(selected, decode); }
+                try { execute(selected, next.second); }
                 catch (const std::exception& error) {
                     std::lock_guard<std::mutex> lock(mutex);
                     log("worker", error);
                     selected->data["state"] = "cleanup_pending";
                     selected->data["error"] = "Processing failed: unsupported replay, worker failure, or resource limit";
-                    selected->data["expires"] = now(); save(selected);
+                    selected->data["expires"] = time_now(); save(selected);
                 }
             } else Sleep(200);
         }
@@ -688,7 +789,8 @@ int serve(const fs::path& root) {
                 catch (const ApiError& error) { request.send(error.status, Json{{"error", error.what()}}.dump()); }
                 catch (const std::exception& error) {
                     { std::lock_guard<std::mutex> lock(server.mutex); server.log("request", error); }
-                    request.send(500, Json{{"error", "Request failed; no result was published"}}.dump());
+                    if (!request.response_started)
+                        request.send(500, Json{{"error", "Request failed; no result was published"}}.dump());
                 }
             } catch (const std::exception& error) {
                 if (!constructed) closesocket(client);
